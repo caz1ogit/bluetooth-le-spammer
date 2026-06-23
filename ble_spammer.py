@@ -24,9 +24,10 @@ from scapy.layers.bluetooth import (
     HCI_Cmd_LE_Set_Advertising_Parameters,
     HCI_Cmd_LE_Set_Advertising_Data,
     HCI_Event_Hdr,
+    HCI_Event_Command_Complete,
 )
 
-from utils import colorir, verificar_root
+from utils import colorize, require_root, BluetoothSpammerError, Color
 
 OGF_LE = 0x08
 OCF_SET_RANDOM_ADDR = 0x0005
@@ -43,11 +44,11 @@ INTERVALO_ADV_PADRAO = 0x00A0
 
 NAME_MAX_BYTES = ADVERTISING_DATA_MAX - len(FLAGS_AD) - 2
 
-RE_MAC = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
+_MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
 
 
-def validar_mac(mac: str) -> bool:
-    return bool(RE_MAC.match(mac.strip()))
+def _validate_mac(mac: str) -> bool:
+    return bool(_MAC_RE.match(mac.strip()))
 
 
 def gerar_mac_aleatorio() -> str:
@@ -89,24 +90,30 @@ def obter_nome_interface(interface_nome: str) -> int:
 
 def interface_suporta_ble(nome: str) -> bool:
     try:
+        # Tenta deixar a interface UP para obter as infos completas
+        subprocess.run(['hciconfig', nome, 'up'], capture_output=True, timeout=5)
+        time.sleep(0.2)
         result = subprocess.run(
-            ['hcitool', 'hci', 'dev', nome],
+            ['hciconfig', '-a', nome],
             capture_output=True, text=True, timeout=5
         )
-        if 'not available' in (result.stdout + result.stderr).lower():
-            return False
-        supported = subprocess.run(
-            ['hcitool', '-i', nome, 'features'],
-            capture_output=True, text=True, timeout=5
+        output = result.stdout + result.stderr
+        # BLE existe desde o Bluetooth 4.0 (HCI/LMP version 0x06)
+        match = re.search(
+            r'(HCI Version|LMP Version):\s+\S+\s+\(0x([0-9a-fA-F]+)\)',
+            output
         )
-        if 'LE' in supported.stdout:
-            return True
+        if match:
+            version = int(match.group(2), 16)
+            if version >= 0x06:
+                return True
     except Exception:
         pass
     try:
         with open(f'/sys/class/bluetooth/{nome}/device/features', 'rb') as f:
             features = f.read()
-            if len(features) >= 2 and (features[1] & 0x20):
+            # LE Supported (Controller): byte 4, bit 1 (máscara 0x02)
+            if len(features) >= 5 and (features[4] & 0x02):
                 return True
     except Exception:
         pass
@@ -117,7 +124,7 @@ def obter_mac_original(nome: str) -> str | None:
     try:
         with open(f'/sys/class/bluetooth/{nome}/address') as f:
             mac = f.read().strip().upper()
-            if validar_mac(mac):
+            if _validate_mac(mac):
                 return mac
     except Exception:
         pass
@@ -125,34 +132,40 @@ def obter_mac_original(nome: str) -> str | None:
 
 
 def liberar_interface(nome: str):
+    """Libera o adaptador do bluetoothd e sobe a interface para socket HCI raw."""
     try:
         subprocess.run(
             ['systemctl', 'stop', 'bluetooth'],
             capture_output=True, timeout=10, check=True
         )
         time.sleep(0.5)
-        return
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            ['bluetoothctl', 'power', 'off'],
-            capture_output=True, timeout=5, check=True
-        )
-        time.sleep(0.3)
     except Exception:
         try:
             subprocess.run(
-                ['hciconfig', nome, 'down'],
-                capture_output=True, timeout=5
-            )
-            subprocess.run(
-                ['hciconfig', nome, 'up'],
-                capture_output=True, timeout=5
+                ['bluetoothctl', 'power', 'off'],
+                capture_output=True, timeout=5, check=True
             )
             time.sleep(0.3)
         except Exception:
-            pass
+            try:
+                subprocess.run(
+                    ['hciconfig', nome, 'down'],
+                    capture_output=True, timeout=5
+                )
+                time.sleep(0.1)
+            except Exception:
+                pass
+
+    # O socket HCI raw exige que a interface esteja UP no kernel.
+    # Garante isso independentemente do metodo usado acima.
+    try:
+        subprocess.run(
+            ['hciconfig', nome, 'up'],
+            capture_output=True, timeout=5
+        )
+        time.sleep(0.3)
+    except Exception:
+        pass
 
 
 def restaurar_interface(nome: str):
@@ -196,8 +209,8 @@ def abrir_socket_raw(interface_idx: int) -> BluetoothHCISocket:
         pass
         return sock
     except Exception as e:
-        print(colorir(
-            f"ERRO: Nao foi possivel abrir socket HCI na interface {interface_idx}.", 'vermelho'))
+        print(colorize(
+            f"ERRO: Nao foi possivel abrir socket HCI na interface {interface_idx}.", Color.RED))
         print(f"Detalhe: {e}")
         print("Verifique o adaptador Bluetooth e execute com sudo.")
         sys.exit(1)
@@ -205,12 +218,12 @@ def abrir_socket_raw(interface_idx: int) -> BluetoothHCISocket:
 
 def enviar_cmd(sock: BluetoothHCISocket | None, pkt, dry_run: bool = False):
     if dry_run or sock is None:
-        print(colorir(f"  [DRY-RUN] Enviaria: {bytes(pkt).hex()}", 'amarelo'))
+        print(colorize(f"  [DRY-RUN] Enviaria: {bytes(pkt).hex()}", Color.YELLOW))
         return
     try:
         sock.send(pkt)
     except Exception as e:
-        print(colorir(f"Erro ao enviar comando HCI: {e}", 'vermelho'))
+        print(colorize(f"Erro ao enviar comando HCI: {e}", Color.RED))
 
 
 def enviar_cmd_e_aguardar(sock: BluetoothHCISocket | None, pkt, timeout: float = 0.5) -> bool:
@@ -228,18 +241,23 @@ def enviar_cmd_e_aguardar(sock: BluetoothHCISocket | None, pkt, timeout: float =
             if ready[0]:
                 try:
                     resp = sock.recv(4096)
-                    if HCI_Event_Hdr in resp and resp[HCI_Event_Hdr].code == 0x0E:
-                        return True
+                    if HCI_Event_Command_Complete in resp:
+                        status = resp[HCI_Event_Command_Complete].status
+                        if status != 0x00:
+                            print(colorize(
+                                f"  HCI comando rejeitado (status 0x{status:02X})",
+                                Color.YELLOW))
+                        return status == 0x00
                 except Exception:
                     pass
     except Exception as e:
-        print(colorir(f"Erro ao enviar comando HCI: {e}", 'vermelho'))
+        print(colorize(f"Erro ao enviar comando HCI: {e}", Color.RED))
     return False
 
 
 def resetar_controller(sock: BluetoothHCISocket | None, dry_run: bool = False) -> bool:
     if dry_run or sock is None:
-        print(colorir("  [DRY-RUN] HCI_Reset", 'amarelo'))
+        print(colorize("  [DRY-RUN] HCI_Reset", Color.YELLOW))
         return True
     pkt = HCI_Hdr(type=1) / HCI_Command_Hdr(ogf=OGF_CONTROLLER, ocf=OCF_RESET)
     ok = enviar_cmd_e_aguardar(sock, pkt, timeout=1.0)
@@ -264,19 +282,19 @@ def configurar_advertising_params(sock: BluetoothHCISocket | None,
         )
     )
     if dry_run or sock is None:
-        print(colorir("  [DRY-RUN] Set Advertising Parameters", 'amarelo'))
+        print(colorize("  [DRY-RUN] Set Advertising Parameters", Color.YELLOW))
         return True
     ok = enviar_cmd_e_aguardar(sock, pkt)
     time.sleep(0.05)
     if not ok:
-        print(colorir("  [FALHA] Set Advertising Parameters", 'vermelho'))
+        print(colorize("  [FALHA] Set Advertising Parameters", Color.RED))
     return ok
 
 
 def configurar_random_address(sock: BluetoothHCISocket | None,
                               mac: str, dry_run: bool = False) -> bool:
     if dry_run or sock is None:
-        print(colorir(f"  [DRY-RUN] Set Random Address: {mac}", 'amarelo'))
+        print(colorize(f"  [DRY-RUN] Set Random Address: {mac}", Color.YELLOW))
         return True
     try:
         pkt = (
@@ -287,10 +305,10 @@ def configurar_random_address(sock: BluetoothHCISocket | None,
         ok = enviar_cmd_e_aguardar(sock, pkt)
         time.sleep(0.05)
         if not ok:
-            print(colorir(f"  AVISO: Random address {mac} rejeitado pelo controller.", 'amarelo'))
+            print(colorize(f"  AVISO: Random address {mac} rejeitado pelo controller.", Color.YELLOW))
         return ok
     except Exception as e:
-        print(colorir(f"Erro ao configurar random address: {e}", 'vermelho'))
+        print(colorize(f"Erro ao configurar random address: {e}", Color.RED))
         return False
 
 
@@ -303,12 +321,12 @@ def configurar_advertising_data(sock: BluetoothHCISocket | None,
         HCI_Cmd_LE_Set_Advertising_Data(data=ad_padded)
     )
     if dry_run or sock is None:
-        print(colorir(f"  [DRY-RUN] AD Data: {ad_padded.hex()}", 'amarelo'))
+        print(colorize(f"  [DRY-RUN] AD Data: {ad_padded.hex()}", Color.YELLOW))
         return True
     ok = enviar_cmd_e_aguardar(sock, pkt)
     time.sleep(0.05)
     if not ok:
-        print(colorir("  [FALHA] Set Advertising Data", 'vermelho'))
+        print(colorize("  [FALHA] Set Advertising Data", Color.RED))
     return ok
 
 
@@ -321,12 +339,12 @@ def configurar_advertising_enable(sock: BluetoothHCISocket | None,
         Raw(comando)
     )
     if dry_run or sock is None:
-        print(colorir(f"  [DRY-RUN] Advertising {'ON' if habilitar else 'OFF'}", 'amarelo'))
+        print(colorize(f"  [DRY-RUN] Advertising {'ON' if habilitar else 'OFF'}", Color.YELLOW))
         return True
     ok = enviar_cmd_e_aguardar(sock, pkt)
     time.sleep(0.05)
     if not ok:
-        print(colorir(f"  [FALHA] Advertising {'ON' if habilitar else 'OFF'}", 'vermelho'))
+        print(colorize(f"  [FALHA] Advertising {'ON' if habilitar else 'OFF'}", Color.RED))
     return ok
 
 
@@ -365,27 +383,27 @@ def executar_modo_single(args, dry_run: bool = False):
     try:
         interface_idx = obter_nome_interface(args.interface)
     except ValueError as e:
-        print(colorir(f"ERRO: {e}", 'vermelho'))
+        print(colorize(f"ERRO: {e}", Color.RED))
         return
 
-    if not validar_mac(mac):
-        print(colorir(f"ERRO: MAC invalido: {mac}", 'vermelho'))
+    if not _validate_mac(mac):
+        print(colorize(f"ERRO: MAC invalido: {mac}", Color.RED))
         return
 
     ad_bytes = construir_ad_data(nome)
 
-    print(colorir(f"MAC:     {mac}", 'ciano'))
-    print(colorir(f"Nome:    {nome}", 'ciano'))
-    print(colorir(f"AD data: {ad_bytes.hex()}", 'amarelo'))
+    print(colorize(f"MAC:     {mac}", Color.CYAN))
+    print(colorize(f"Nome:    {nome}", Color.CYAN))
+    print(colorize(f"AD data: {ad_bytes.hex()}", Color.YELLOW))
     print(f"Tamanho: {len(ad_bytes)} bytes")
     print()
 
     if dry_run:
-        print(colorir("[DRY-RUN] Simulacao concluida. Nenhum pacote foi enviado.", 'verde'))
+        print(colorize("[DRY-RUN] Simulacao concluida. Nenhum pacote foi enviado.", Color.GREEN))
         return
 
-    print(colorir("Preparando interface...", 'amarelo'))
-    print(colorir("AVISO: O Bluetooth do computador sera desabilitado temporariamente.", 'vermelho'))
+    print(colorize("Preparando interface...", Color.YELLOW))
+    print(colorize("AVISO: O Bluetooth do computador sera desabilitado temporariamente.", Color.RED))
     liberar_interface(args.interface)
     sock = abrir_socket_raw(interface_idx)
     mac_original = obter_mac_original(args.interface)
@@ -401,19 +419,25 @@ def executar_modo_single(args, dry_run: bool = False):
     signal.signal(signal.SIGINT, sinal_encerrar)
 
     try:
-        configurar_advertising_params(sock)
-        configurar_random_address(sock, mac)
+        if args.public_address:
+            usar_random_addr = False
+            configurar_advertising_params(sock, usar_random_addr=False)
+        else:
+            configurar_advertising_params(sock, usar_random_addr=True)
+            usar_random_addr = configurar_random_address(sock, mac)
+            if not usar_random_addr:
+                configurar_advertising_params(sock, usar_random_addr=False)
         configurar_advertising_data(sock, ad_bytes)
         configurar_advertising_enable(sock, True)
 
-        print(colorir("Transmitindo... Pressione Ctrl+C para encerrar.", 'verde'))
+        print(colorize("Transmitindo... Pressione Ctrl+C para encerrar.", Color.GREEN))
         print("-" * 60)
 
         while executando:
             decorrido = time.time() - inicio
             contador += 1
             sys.stdout.write(
-                f"\r{colorir('[ATIVO]', 'verde')} MAC: {mac}  "
+                f"\r{colorize('[ATIVO]', Color.GREEN)} MAC: {mac}  "
                 f"| Nome: {nome}  "
                 f"| Tempo: {formatar_tempo(decorrido)}  "
                 f"| Ciclos: {contador}  "
@@ -423,15 +447,15 @@ def executar_modo_single(args, dry_run: bool = False):
 
     finally:
         configurar_advertising_enable(sock, False)
-        if mac_original and mac_original != mac:
+        if mac_original and usar_random_addr:
             configurar_random_address(sock, mac_original)
-        print(colorir("Restaurando Bluetooth...", "amarelo"))
+        print(colorize("Restaurando Bluetooth...", Color.YELLOW))
         restaurar_interface(args.interface)
         sock.close()
 
     total = time.time() - inicio
     print()
-    print(colorir(f"\nEncerrado. {contador} ciclos em {formatar_tempo(total)}.", 'verde'))
+    print(colorize(f"\nEncerrado. {contador} ciclos em {formatar_tempo(total)}.", Color.GREEN))
 
 
 def anunciar_dispositivo(sock, mac, nome, ad_bytes, dwell, usar_random_addr=True):
@@ -447,26 +471,30 @@ def anunciar_dispositivo(sock, mac, nome, ad_bytes, dwell, usar_random_addr=True
 
 def executar_spam_sequencial(args, parar: threading.Event):
     interface_idx = obter_nome_interface(args.interface)
-    print(colorir("AVISO: O Bluetooth do computador sera desabilitado temporariamente.", 'vermelho'))
-    print(colorir("Apos o Ctrl+C, o Bluetooth sera restaurado automaticamente.\n", 'amarelo'))
+    print(colorize("AVISO: O Bluetooth do computador sera desabilitado temporariamente.", Color.RED))
+    print(colorize("Apos o Ctrl+C, o Bluetooth sera restaurado automaticamente.\n", Color.YELLOW))
     liberar_interface(args.interface)
     sock = abrir_socket_raw(interface_idx)
     mac_original = obter_mac_original(args.interface)
 
-    print(colorir("Resetando controller...", 'amarelo'))
+    print(colorize("Resetando controller...", Color.YELLOW))
     resetar_controller(sock)
 
-    usar_random_addr = True
-    if not configurar_advertising_params(sock, usar_random_addr=True):
-        print(colorir("AVISO: Falha ao configurar advertising parameters.", 'amarelo'))
+    if args.public_address:
         usar_random_addr = False
+        configurar_advertising_params(sock, usar_random_addr=False)
+    else:
+        usar_random_addr = True
+        if not configurar_advertising_params(sock, usar_random_addr=True):
+            print(colorize("AVISO: Falha ao configurar advertising parameters.", Color.YELLOW))
+            usar_random_addr = False
 
     contador = 0
     inicio = time.time()
 
-    print(colorir(f"Usando adaptador: {args.interface}", 'ciano'))
+    print(colorize(f"Usando adaptador: {args.interface}", Color.CYAN))
     if mac_original:
-        print(colorir(f"MAC real: {mac_original}", 'amarelo'))
+        print(colorize(f"MAC real: {mac_original}", Color.YELLOW))
     print()
 
     while not parar.is_set():
@@ -477,23 +505,23 @@ def executar_spam_sequencial(args, parar: threading.Event):
 
         if usar_random_addr:
             if not configurar_random_address(sock, mac):
-                print(colorir(
+                print(colorize(
                     "  Random address rejeitado. Mudando para endereco publico.",
-                    'amarelo'))
+                    Color.YELLOW))
                 usar_random_addr = False
                 configurar_advertising_params(sock, usar_random_addr=False)
 
         if not configurar_advertising_data(sock, ad_bytes):
-            print(colorir("  AVISO: Falha ao configurar advertising data.", 'amarelo'))
+            print(colorize("  AVISO: Falha ao configurar advertising data.", Color.YELLOW))
 
         if not configurar_advertising_enable(sock, True):
-            print(colorir("  AVISO: Falha ao habilitar advertising.", 'amarelo'))
+            print(colorize("  AVISO: Falha ao habilitar advertising.", Color.YELLOW))
 
         decorrido = time.time() - inicio
         sys.stdout.write(
-            f"\r{colorir(f'[Dispositivo {contador}]', 'verde')} "
-            f"MAC: {colorir(mac, 'ciano')} | "
-            f"Nome: {colorir(nome, 'amarelo')} | "
+            f"\r{colorize(f'[Dispositivo {contador}]', Color.GREEN)} "
+            f"MAC: {colorize(mac, Color.CYAN)} | "
+            f"Nome: {colorize(nome, Color.YELLOW)} | "
             f"Tempo: {formatar_tempo(decorrido)}  "
         )
         sys.stdout.flush()
@@ -506,9 +534,9 @@ def executar_spam_sequencial(args, parar: threading.Event):
             if _ % 10 == 0:
                 decorrido = time.time() - inicio
                 sys.stdout.write(
-                    f"\r{colorir(f'[Dispositivo {contador}]', 'verde')} "
-                    f"MAC: {colorir(mac, 'ciano')} | "
-                    f"Nome: {colorir(nome, 'amarelo')} | "
+                    f"\r{colorize(f'[Dispositivo {contador}]', Color.GREEN)} "
+                    f"MAC: {colorize(mac, Color.CYAN)} | "
+                    f"Nome: {colorize(nome, Color.YELLOW)} | "
                     f"Tempo: {formatar_tempo(decorrido)}  "
                 )
                 sys.stdout.flush()
@@ -517,11 +545,11 @@ def executar_spam_sequencial(args, parar: threading.Event):
 
     total = time.time() - inicio
     print()
-    print(colorir("\nDesligando advertising e restaurando adaptador...", 'amarelo'))
+    print(colorize("\nDesligando advertising e restaurando adaptador...", Color.YELLOW))
     configurar_advertising_enable(sock, False)
-    if mac_original:
+    if mac_original and usar_random_addr:
         configurar_random_address(sock, mac_original)
-    print(colorir("Restaurando Bluetooth...", 'amarelo'))
+    print(colorize("Restaurando Bluetooth...", Color.YELLOW))
     restaurar_interface(args.interface)
     sock.close()
 
@@ -529,33 +557,40 @@ def executar_spam_sequencial(args, parar: threading.Event):
 
 
 def anunciar_continuamente(interface: str, mac: str, nome: str,
-                           parar: threading.Event):
+                           parar: threading.Event,
+                           public_address: bool = False):
     ad_bytes = construir_ad_data(nome)
     try:
         interface_idx = obter_nome_interface(interface)
     except ValueError as e:
-        print(colorir(f"ERRO ({interface}): {e}", 'vermelho'))
+        print(colorize(f"ERRO ({interface}): {e}", Color.RED))
         return
 
-    print(colorir(f"  {interface}: MAC={mac} Nome={nome}", 'ciano'))
-    print(colorir(f"  {interface}: Desabilitando Bluetooth temporariamente...", 'vermelho'))
+    print(colorize(f"  {interface}: MAC={mac} Nome={nome}", Color.CYAN))
+    print(colorize(f"  {interface}: Desabilitando Bluetooth temporariamente...", Color.RED))
     liberar_interface(interface)
     sock = abrir_socket_raw(interface_idx)
     mac_original = obter_mac_original(interface)
 
-    configurar_advertising_params(sock, usar_random_addr=True)
-    configurar_random_address(sock, mac)
+    if public_address:
+        usar_random_addr = False
+        configurar_advertising_params(sock, usar_random_addr=False)
+    else:
+        configurar_advertising_params(sock, usar_random_addr=True)
+        usar_random_addr = configurar_random_address(sock, mac)
+        if not usar_random_addr:
+            configurar_advertising_params(sock, usar_random_addr=False)
     configurar_advertising_data(sock, ad_bytes)
     configurar_advertising_enable(sock, True)
 
-    print(colorir(f"  {interface}: Anunciando continuamente...", 'verde'))
+    print(colorize(f"  {interface}: Anunciando continuamente...", Color.GREEN))
 
     while not parar.is_set():
         time.sleep(0.5)
 
-    print(colorir(f"  {interface}: Encerrando...", 'amarelo'))
+    print(colorize(f"  {interface}: Encerrando...", Color.YELLOW))
     configurar_advertising_enable(sock, False)
-    if mac_original:
+    if mac_original and usar_random_addr:
         configurar_random_address(sock, mac_original)
     restaurar_interface(interface)
     sock.close()
@@ -569,15 +604,16 @@ def executar_spam_multiplo(args, adaptadores: list[str], parar: threading.Event)
         t = threading.Thread(
             target=anunciar_continuamente,
             args=(interface, mac, nome, parar),
+            kwargs={'public_address': args.public_address},
             daemon=True
         )
         threads.append(t)
 
-    print(colorir(f"Iniciando {len(threads)} adaptadores em paralelo...", 'verde'))
+    print(colorize(f"Iniciando {len(threads)} adaptadores em paralelo...", Color.GREEN))
     for t in threads:
         t.start()
 
-    print(colorir("Pressione Ctrl+C para encerrar.\n", 'amarelo'))
+    print(colorize("Pressione Ctrl+C para encerrar.\n", Color.YELLOW))
 
     while not parar.is_set():
         time.sleep(0.5)
@@ -592,55 +628,55 @@ def executar_modo_spam(args, dry_run: bool = False):
         adaptadores = [args.interface]
 
     if len(adaptadores) > 1:
-        print(colorir(f"Detectados {len(adaptadores)} adaptadores BLE.", 'ciano'))
+        print(colorize(f"Detectados {len(adaptadores)} adaptadores BLE.", Color.CYAN))
         for a in adaptadores:
-            print(colorir(f"  - {a}", 'ciano'))
+            print(colorize(f"  - {a}", Color.CYAN))
         print()
 
     if dry_run:
         num = args.count if args.count > 0 else 5
-        print(colorir(f"Simulando {num} dispositivos sequenciais:", 'amarelo'))
+        print(colorize(f"Simulando {num} dispositivos sequenciais:", Color.YELLOW))
         for i in range(num):
             mac = gerar_mac_aleatorio()
             nome = gerar_nome_aleatorio(args.prefix)
             ad_bytes = construir_ad_data(nome)
-            print(colorir(
+            print(colorize(
                 f"  [{i+1}] MAC: {mac} | Nome: {nome} | "
                 f"AD: {len(ad_bytes)} bytes | Payload: {ad_bytes.hex()}",
-                'amarelo'
+                Color.YELLOW
             ))
         print()
         if len(adaptadores) > 1:
-            print(colorir(f"Com {len(adaptadores)} adaptadores, cada um manteria um dispositivo fixo.", 'amarelo'))
-        print(colorir("[DRY-RUN] Simulacao concluida. Nenhum pacote foi enviado.", 'verde'))
+            print(colorize(f"Com {len(adaptadores)} adaptadores, cada um manteria um dispositivo fixo.", Color.YELLOW))
+        print(colorize("[DRY-RUN] Simulacao concluida. Nenhum pacote foi enviado.", Color.GREEN))
         return
 
     parar = threading.Event()
 
     def sinal_encerrar(sig, frame):
-        print(colorir("\n\nSinal de encerramento recebido. Finalizando...", 'amarelo'))
+        print(colorize("\n\nSinal de encerramento recebido. Finalizando...", Color.YELLOW))
         parar.set()
 
     signal.signal(signal.SIGINT, sinal_encerrar)
     signal.signal(signal.SIGTERM, sinal_encerrar)
 
-    print(colorir(f"Interface: {args.interface}", 'ciano'))
-    print(colorir(f"Modo:      spam", 'ciano'))
-    print(colorir(f"Dwell:     {args.dwell}s por dispositivo", 'ciano'))
-    print(colorir(f"Prefixo:   {args.prefix}", 'amarelo'))
+    print(colorize(f"Interface: {args.interface}", Color.CYAN))
+    print(colorize(f"Modo:      spam", Color.CYAN))
+    print(colorize(f"Dwell:     {args.dwell}s por dispositivo", Color.CYAN))
+    print(colorize(f"Prefixo:   {args.prefix}", Color.YELLOW))
     print()
 
     if len(adaptadores) > 1:
-        print(colorir(
+        print(colorize(
             f"Usando {len(adaptadores)} adaptadores em paralelo. "
-            f"Cada um mantem um dispositivo fixo.", 'verde'))
+            f"Cada um mantem um dispositivo fixo.", Color.GREEN))
         executar_spam_multiplo(args, adaptadores, parar)
         total_dispositivos = len(adaptadores)
         total_tempo = 0
     else:
-        print(colorir(
+        print(colorize(
             "Um adaptador detectado. Modo sequencial: "
-            "cria dispositivos um por vez.", 'verde'))
+            "cria dispositivos um por vez.", Color.GREEN))
         total_dispositivos, total_tempo = executar_spam_sequencial(args, parar)
 
     print()
@@ -654,7 +690,11 @@ def executar_modo_spam(args, dry_run: bool = False):
 
 
 def main():
-    verificar_root()
+    try:
+        require_root()
+    except BluetoothSpammerError as e:
+        print(colorize(f"Error: {e}", Color.RED))
+        sys.exit(1)
 
     parser = argparse.ArgumentParser(
         description='BLE Spammer - Gerador de Advertising BLE com MACs e nomes aleatorios',
@@ -684,27 +724,29 @@ Exemplos:
                         help=f'Prefixo para nomes aleatorios (padrao: {SUFIXO_PADRAO})')
     parser.add_argument('--interface', '-i', type=str, default='hci0',
                         help='Interface HCI (padrao: hci0)')
+    parser.add_argument('--public-address', action='store_true',
+                        help='Forca uso do endereco publico (nao tenta endereco aleatorio)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Simula execucao sem abrir socket HCI')
 
     args = parser.parse_args()
 
     if not args.interface.startswith('hci'):
-        print(colorir(f"ERRO: Interface deve comecar com 'hci' (ex: hci0)", 'vermelho'))
+        print(colorize(f"ERRO: Interface deve comecar com 'hci' (ex: hci0)", Color.RED))
         sys.exit(1)
 
     try:
         obter_nome_interface(args.interface)
     except ValueError as e:
-        print(colorir(f"ERRO: {e}", 'vermelho'))
+        print(colorize(f"ERRO: {e}", Color.RED))
         sys.exit(1)
 
-    if args.mac and not validar_mac(args.mac):
-        print(colorir(f"ERRO: MAC invalido: {args.mac}. Use formato XX:XX:XX:XX:XX:XX", 'vermelho'))
+    if args.mac and not _validate_mac(args.mac):
+        print(colorize(f"ERRO: MAC invalido: {args.mac}. Use formato XX:XX:XX:XX:XX:XX", Color.RED))
         sys.exit(1)
 
     if args.name and len(args.name) > 24:
-        print(colorir(f"AVISO: Nome truncado para 24 caracteres.", 'amarelo'))
+        print(colorize(f"AVISO: Nome truncado para 24 caracteres.", Color.YELLOW))
         args.name = args.name[:24]
 
     args.dwell = max(args.dwell, 3.0)
@@ -712,23 +754,23 @@ Exemplos:
         args.interval = args.dwell
 
     if args.count < 0:
-        print(colorir("ERRO: --count deve ser >= 0", 'vermelho'))
+        print(colorize("ERRO: --count deve ser >= 0", Color.RED))
         sys.exit(1)
 
     if args.mode == 'single':
         if args.count != 10:
-            print(colorir("AVISO: --count ignorado no modo single.", 'amarelo'))
+            print(colorize("AVISO: --count ignorado no modo single.", Color.YELLOW))
     elif args.mode == 'spam':
         if args.name or args.mac:
-            print(colorir("AVISO: --name e --mac ignorados no modo spam.", 'amarelo'))
+            print(colorize("AVISO: --name e --mac ignorados no modo spam.", Color.YELLOW))
 
     exibir_banner()
 
     if not args.dry_run:
         if not interface_suporta_ble(args.interface):
-            print(colorir(
+            print(colorize(
                 f"AVISO: Interface {args.interface} pode nao suportar BLE. "
-                f"Procedendo mesmo assim.", 'amarelo'
+                f"Procedendo mesmo assim.", Color.YELLOW
             ))
 
     try:
@@ -737,7 +779,7 @@ Exemplos:
         else:
             executar_modo_spam(args, dry_run=args.dry_run)
     except KeyboardInterrupt:
-        print(colorir("\n\nInterrompido pelo usuario.", 'amarelo'))
+        print(colorize("\n\nInterrompido pelo usuario.", Color.YELLOW))
         sys.exit(0)
 
 

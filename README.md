@@ -11,7 +11,10 @@ O `ble_spammer.py` gera pacotes de **Advertising BLE** com endereços MAC e nome
 ## Conteúdo do repositório
 
 - `ble_spammer.py` — Gera pacotes de **Advertising BLE** com MACs e nomes aleatórios.
-- `utils.py` — Funções auxiliares usadas pelo `ble_spammer.py` (cores no terminal, verificação de root etc.).
+- `utils.py` — Funções auxiliares compartilhadas (validação de MAC, cores no terminal, verificação de root, detecção de MAC local etc.).
+- `injector.py` — Ferramenta auxiliar para injeção/camuflagem de pacotes Bluetooth.
+- `scanner.py` — Scanner de dispositivos Bluetooth próximos via HCI.
+- `tests/` — Testes unitários para `utils.py`.
 
 ---
 
@@ -130,17 +133,23 @@ sudo python3 ble_spammer.py
 ### 6.2 Argumentos comuns
 
 ```bash
-sudo python3 ble_spammer.py -i hci0 -n 5 -t 0.1 -p "BT-Test-"
+sudo python3 ble_spammer.py -i hci0 -d 3 -p "BT-Test-"
 ```
 
-Opções típicas (verifique com `--help`):
+Opções disponíveis (verifique com `--help`):
 
 | Opção | Descrição |
 |-------|-----------|
-| `-i`, `--interface` | Interface HCI (ex: `hci0`) |
-| `-n`, `--count` | Quantidade de dispositivos simulados |
-| `-t`, `--interval` | Intervalo entre trocas de anúncio |
-| `-p`, `--prefix` | Prefixo do nome exibido no advertising |
+| `-m`, `--mode` | Modo de operação: `single` (um dispositivo fixo) ou `spam` (vários dispositivos sequenciais) |
+| `-i`, `--interface` | Interface HCI (ex: `hci0`, padrão: `hci0`) |
+| `-d`, `--dwell` | Tempo em segundos que cada dispositivo fica visível no modo `spam` (mínimo: 3.0) |
+| `-t`, `--interval` | Intervalo entre criação de dispositivos no modo `single` |
+| `-c`, `--count` | Quantidade de dispositivos simulados no `--dry-run` |
+| `-n`, `--name` | Nome fixo para o modo `single` |
+| `-a`, `--mac` | MAC fixo para o modo `single` |
+| `-p`, `--prefix` | Prefixo do nome exibido no advertising (padrão: `BT-Device-`) |
+| `--public-address` | Força o uso do endereço público do adaptador (não tenta endereço aleatório) |
+| `--dry-run` | Simula a execução sem abrir o socket HCI |
 
 Consulte todas as opções:
 
@@ -154,7 +163,23 @@ Pressione `Ctrl + C` para encerrar de forma segura.
 
 ---
 
-## 7. Resolução de problemas
+## 7. Utilitários (`utils.py`)
+
+O `utils.py` centraliza funções reutilizáveis pelos scripts do projeto:
+
+| Função/Classe | Descrição |
+|---------------|-----------|
+| `Color` | Enum com códigos ANSI para colorir saída no terminal. |
+| `colorize(text, color)` | Aplica uma cor ao texto. |
+| `validate_mac(mac)` | Valida se uma string está no formato `XX:XX:XX:XX:XX:XX`. |
+| `format_mac(mac)` | Normaliza um MAC para maiúsculas e formato canônico. |
+| `get_local_mac(interface=0)` | Obtém o MAC do adaptador local via Scapy ou `hcitool`. |
+| `require_root()` | Levanta `BluetoothSpammerError` se o script não estiver rodando como root. |
+| `BluetoothSpammerError` | Exceção base dos scripts. |
+
+---
+
+## 8. Resolução de problemas
 
 ### Erro: `Permission denied` ao abrir socket HCI
 
@@ -188,20 +213,43 @@ ls /sys/class/bluetooth/
 
 Se o diretório estiver vazio, o sistema não detectou nenhum adaptador Bluetooth.
 
+### Erro: `Network is down` ao enviar comandos HCI
+
+A interface HCI está DOWN no kernel. O script tenta subir a interface automaticamente, mas pode falhar se o adaptador estiver bloqueado por RF-kill. Verifique e desbloqueie:
+
+```bash
+rfkill list
+sudo rfkill unblock bluetooth
+sudo hciconfig hci0 up
+```
+
+### O script executa, mas o nRF Connect não encontra os dispositivos
+
+Alguns adaptadores (como clones CSR8510) rejeitam endereços MAC aleatórios. O script detecta isso e cai para o endereço público automaticamente, mas você pode forçar o uso do endereço público:
+
+```bash
+sudo python3 ble_spammer.py -i hci0 --public-address
+```
+
 ---
 
-## 8. Estrutura do projeto
+## 9. Estrutura do projeto
 
 ```
 bluetooth-le-spammer/
 ├── README.md
 ├── ble_spammer.py
-└── utils.py
+├── utils.py
+├── injector.py
+├── scanner.py
+└── tests/
+    ├── __init__.py
+    └── test_utils.py
 ```
 
 ---
 
-## 9. Tecnologias utilizadas
+## 10. Tecnologias utilizadas
 
 - Python 3
 - Scapy
