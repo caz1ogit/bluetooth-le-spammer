@@ -12,9 +12,6 @@ O `ble_spammer.py` gera pacotes de **Advertising BLE** com endereços MAC e nome
 
 - `ble_spammer.py` — Gera pacotes de **Advertising BLE** com MACs e nomes aleatórios.
 - `utils.py` — Funções auxiliares compartilhadas (validação de MAC, cores no terminal, verificação de root, detecção de MAC local etc.).
-- `injector.py` — Ferramenta auxiliar para injeção/camuflagem de pacotes Bluetooth.
-- `scanner.py` — Scanner de dispositivos Bluetooth próximos via HCI.
-- `tests/` — Testes unitários para `utils.py`.
 
 ---
 
@@ -239,12 +236,7 @@ sudo python3 ble_spammer.py -i hci0 --public-address
 bluetooth-le-spammer/
 ├── README.md
 ├── ble_spammer.py
-├── utils.py
-├── injector.py
-├── scanner.py
-└── tests/
-    ├── __init__.py
-    └── test_utils.py
+└── utils.py
 ```
 
 ---
