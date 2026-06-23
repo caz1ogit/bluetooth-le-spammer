@@ -1,24 +1,24 @@
-# projeto_redes
+# Bluetooth LE Spammer
 
-Projeto educacional para estudo do protocolo **Bluetooth** (Classic e BLE) usando Python e Scapy.
+Projeto educacional para estudo do protocolo **Bluetooth Low Energy (BLE)** usando Python e Scapy.
 
-> **Aviso legal:** Este projeto foi desenvolvido para fins acadêmicos e de pesquisa. O uso indevido dessas ferramentas pode violar leis locais e políticas de rede. Utilize apenas em ambientes controlados e com permissão explícita.
+O `ble_spammer.py` gera pacotes de **Advertising BLE** com endereços MAC e nomes aleatórios, permitindo simular múltiplos dispositivos BLE no ambiente local.
+
+> **Aviso legal:** Este projeto foi desenvolvido para fins acadêmicos e de pesquisa. O uso indevido dessa ferramenta pode violar leis locais e políticas de rede. Utilize apenas em ambientes controlados e com permissão explícita.
 
 ---
 
 ## Conteúdo do repositório
 
 - `ble_spammer.py` — Gera pacotes de **Advertising BLE** com MACs e nomes aleatórios.
-- `injector.py` — Realiza **spoofing de MAC** e injeta pacotes Bluetooth Classic (L2CAP/HCI).
-- `scanner.py` — Realiza **scan contínuo** de dispositivos Bluetooth Classic (BR/EDR) e BLE.
-- `utils.py` — Funções auxiliares (validação de MAC, cores no terminal, verificação de root etc.).
+- `utils.py` — Funções auxiliares usadas pelo `ble_spammer.py` (cores no terminal, verificação de root etc.).
 
 ---
 
 ## Requisitos mínimos
 
 - Sistema **Linux** (testado em distribuições Debian/Ubuntu).
-- Adaptador **Bluetooth USB** compatível com HCI e, preferencialmente, com suporte a **BLE**.
+- Adaptador **Bluetooth USB** compatível com **BLE** e HCI.
 - Python **3.8+**
 - Permissões de **root** (`sudo`).
 
@@ -59,10 +59,11 @@ sudo apt install -y \
 
 ---
 
-## 3. Clonar ou acessar o projeto
+## 3. Clonar o repositório
 
 ```bash
-cd /home/cassio/Downloads/projeto_redes
+git clone https://github.com/caz1ogit/bluetooth-le-spammer.git
+cd bluetooth-le-spammer
 ```
 
 ---
@@ -124,7 +125,7 @@ O script envia anúncios BLE (Advertising) com nomes e endereços MAC aleatório
 sudo python3 ble_spammer.py
 ```
 
-> **Importante:** todos os scripts deste projeto exigem `sudo` ou execução como `root`, pois utilizam sockets HCI brutos.
+> **Importante:** o script deve ser executado com `sudo` ou como `root`, pois utiliza sockets HCI brutos.
 
 ### 6.2 Argumentos comuns
 
@@ -153,27 +154,7 @@ Pressione `Ctrl + C` para encerrar de forma segura.
 
 ---
 
-## 7. Como usar os outros scripts
-
-### `scanner.py`
-
-```bash
-sudo python3 scanner.py
-```
-
-Realiza scan contínuo de dispositivos Bluetooth Classic (BR/EDR inquiry) e BLE. Pressione `Ctrl + C` para sair.
-
-### `injector.py`
-
-```bash
-sudo python3 injector.py
-```
-
-Solicita o MAC do dispositivo alvo e o MAC de origem (ou usa o MAC local) para enviar pacotes L2CAP forjados.
-
----
-
-## 8. Resolução de problemas
+## 7. Resolução de problemas
 
 ### Erro: `Permission denied` ao abrir socket HCI
 
@@ -209,25 +190,23 @@ Se o diretório estiver vazio, o sistema não detectou nenhum adaptador Bluetoot
 
 ---
 
-## 9. Estrutura do projeto
+## 8. Estrutura do projeto
 
 ```
-projeto_redes/
+bluetooth-le-spammer/
 ├── README.md
 ├── ble_spammer.py
-├── injector.py
-├── scanner.py
 └── utils.py
 ```
 
 ---
 
-## 10. Tecnologias utilizadas
+## 9. Tecnologias utilizadas
 
 - Python 3
 - Scapy
 - BlueZ (stack Bluetooth do Linux)
-- HCI / L2CAP / BLE Advertising
+- HCI / BLE Advertising
 
 ---
 
